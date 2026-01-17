@@ -1,0 +1,22 @@
+{
+  "name": "property-scraper",
+  "version": "1.0.0",
+  "description": "Production-ready property website scraper with MongoDB integration",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node index.js --test"
+  },
+  "keywords": ["scraper", "puppeteer", "mongodb", "property", "real-estate"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer": "^21.6.1",
+    "mongodb": "^6.3.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
