@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Property Scraper Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen p-6">
+    <div class="max-w-7xl mx-auto">
+      <!-- Header -->
+      <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-3xl font-bold text-gray-800">
+              🏠 Property Scraper Dashboard
+            </h1>
+            <p class="text-gray-600 mt-1">
+              MagicBricks Property Data Extractor
+            </p>
+          </div>
+          <button
+            onclick="exportToCSV()"
+            id="exportBtn"
+            disabled
+            class="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            📥 Export CSV
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div class="bg-white rounded-lg shadow p-6">
+          <p class="text-gray-600 text-sm">Total Properties</p>
+          <p class="text-3xl font-bold text-indigo-600" id="totalCount">0</p>
+        </div>
+        <div class="bg-white rounded-lg shadow p-6">
+          <p class="text-gray-600 text-sm">Successful</p>
+          <p class="text-3xl font-bold text-green-600" id="successCount">0</p>
+        </div>
+        <div class="bg-white rounded-lg shadow p-6">
+          <p class="text-gray-600 text-sm">Failed</p>
+          <p class="text-3xl font-bold text-red-600" id="failedCount">0</p>
+        </div>
+      </div>
+
+      <!-- Scraper Controls -->
+      <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+        <h2 class="text-xl font-bold text-gray-800 mb-4">Run Scraper</h2>
+        <div class="flex gap-4">
+          <input
+            type="text"
+            id="urlInput"
+            value="https://www.magicbricks.com/flats-for-rent-in-bangalore-pppfr"
+            placeholder="Enter MagicBricks URL"
+            class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <button
+            onclick="runScraper()"
+            id="scrapeBtn"
+            class="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+          >
+            ▶️ Start Scrape
+          </button>
+        </div>
+      </div>
+
+      <!-- Logs -->
+      <div
+        class="bg-white rounded-lg shadow-lg p-6 mb-6"
+        id="logsContainer"
+        style="display: none"
+      >
+        <h2 class="text-xl font-bold text-gray-800 mb-4">Logs</h2>
+        <div
+          class="bg-gray-900 rounded-lg p-4 h-48 overflow-y-auto font-mono text-sm"
+          id="logsContent"
+        ></div>
+      </div>
+
+      <!-- Properties Table -->
+      <div
+        class="bg-white rounded-lg shadow-lg p-6"
+        id="tableContainer"
+        style="display: none"
+      >
+        <h2 class="text-xl font-bold text-gray-800 mb-4">
+          Scraped Properties (<span id="propertyCount">0</span>)
+        </h2>
+        <div class="overflow-x-auto">
+          <table class="w-full">
+            <thead>
+              <tr class="bg-gray-100 border-b">
+                <th
+                  class="px-4 py-3 text-left text-sm font-semibold text-gray-700"
+                >
+                  Title
+                </th>
+                <th
+                  class="px-4 py-3 text-left text-sm font-semibold text-gray-700"
+                >
+                  Location
+                </th>
+                <th
+                  class="px-4 py-3 text-left text-sm font-semibold text-gray-700"
+                >
+                  Price
+                </th>
+                <th
+                  class="px-4 py-3 text-left text-sm font-semibold text-gray-700"
+                >
+                  Details
+                </th>
+              </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Empty State -->
+      <div
+        class="bg-white rounded-lg shadow-lg p-12 text-center"
+        id="emptyState"
+      >
+        <div class="text-6xl mb-4">🏠</div>
+        <p class="text-gray-500 text-lg">
+          No properties scraped yet. Click "Start Scrape" to begin.
+        </p>
+      </div>
+    </div>
+
+    <script>
+      let properties = [];
+      let isRunning = false;
+
+      function addLog(message, type = "info") {
+        const logsContainer = document.getElementById("logsContainer");
+        const logsContent = document.getElementById("logsContent");
+        logsContainer.style.display = "block";
+
+        const timestamp = new Date().toLocaleTimeString();
+        const colors = {
+          info: "text-gray-300",
+          success: "text-green-400",
+          error: "text-red-400",
+        };
+
+        const logEntry = document.createElement("div");
+        logEntry.className = `mb-1 ${colors[type]}`;
+        logEntry.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${message}`;
+        logsContent.appendChild(logEntry);
+        logsContent.scrollTop = logsContent.scrollHeight;
+      }
+
+      function updateStats(total, success, failed) {
+        document.getElementById("totalCount").textContent = total;
+        document.getElementById("successCount").textContent = success;
+        document.getElementById("failedCount").textContent = failed;
+      }
+
+      function renderProperties(data) {
+        const tableBody = document.getElementById("tableBody");
+        const tableContainer = document.getElementById("tableContainer");
+        const emptyState = document.getElementById("emptyState");
+        const propertyCount = document.getElementById("propertyCount");
+        const exportBtn = document.getElementById("exportBtn");
+
+        tableBody.innerHTML = "";
+
+        if (data.length === 0) {
+          tableContainer.style.display = "none";
+          emptyState.style.display = "block";
+          exportBtn.disabled = true;
+          return;
+        }
+
+        tableContainer.style.display = "block";
+        emptyState.style.display = "none";
+        exportBtn.disabled = false;
+        propertyCount.textContent = data.length;
+
+        data.forEach((property) => {
+          const row = document.createElement("tr");
+          row.className = "border-b hover:bg-gray-50 transition";
+          row.innerHTML = `
+          <td class="px-4 py-3 text-sm text-gray-800">${
+            property.title || property.name || "N/A"
+          }</td>
+          <td class="px-4 py-3 text-sm text-gray-600">📍 ${
+            property.location || property.area || "N/A"
+          }</td>
+          <td class="px-4 py-3 text-sm font-semibold text-green-600">${
+            property.price || property.rent || "N/A"
+          }</td>
+          <td class="px-4 py-3 text-sm text-gray-600">${
+            property.bedrooms || property.bhk || "N/A"
+          } | ${property.area || property.sqft || "N/A"}</td>
+        `;
+          tableBody.appendChild(row);
+        });
+      }
+
+      async function runScrapers() {
+        if (isRunning) return;
+
+        const urlInput = document.getElementById("urlInput");
+        const scrapeBtn = document.getElementById("scrapeBtn");
+        const url = urlInput.value.trim();
+
+        if (!url) {
+          alert("Please enter a URL");
+          return;
+        }
+
+        isRunning = true;
+        scrapeBtn.disabled = true;
+        scrapeBtn.innerHTML = "⏳ Running...";
+
+        // Clear previous logs
+        document.getElementById("logsContent").innerHTML = "";
+        addLog("Starting scraper...", "info");
+
+        try {
+          const response = await fetch("http://localhost:3000/api/scrape", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const data = await response.json();
+          properties = data.properties || [];
+
+          updateStats(properties.length, properties.length, 0);
+          renderProperties(properties);
+          addLog(
+            `✅ Scraped ${properties.length} properties successfully`,
+            "success"
+          );
+        } catch (error) {
+          addLog(`❌ Error: ${error.message}`, "error");
+          addLog(
+            "💡 Make sure your API server is running on http://localhost:3000",
+            "info"
+          );
+          updateStats(0, 0, 1);
+        } finally {
+          isRunning = false;
+          scrapeBtn.disabled = false;
+          scrapeBtn.innerHTML = "▶️ Start Scrape";
+        }
+      }
+
+      function exportToCSV() {
+        if (properties.length === 0) return;
+
+        const headers = Object.keys(properties[0]).join(",");
+        const rows = properties.map((p) =>
+          Object.values(p)
+            .map((v) => `"${v}"`)
+            .join(",")
+        );
+        const csv = [headers, ...rows].join("\n");
+
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `properties_${Date.now()}.csv`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+      }
+
+      let eventSource = null;
+      const logsDiv = document.getElementById("logs");
+
+      async function runScraper() {
+        const url = document.getElementById("urlInput").value;
+
+        if (!url) {
+          alert("Please enter a URL");
+          return;
+        }
+
+        // Clear previous logs
+        // logsDiv.innerHTML = "";
+
+        // Close previous connection if exists
+        if (eventSource) {
+          eventSource.close();
+        }
+
+        try {
+          // Start scraping
+          const response = await fetch("http://localhost:3000/scrape", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+          });
+
+          const { sessionId, status } = await response.json();
+
+          addLog("info", `Session started: ${sessionId}`);
+
+          // Connect to SSE for logs
+          eventSource = new EventSource(
+            `http://localhost:3000/scrape/logs/${sessionId}`
+          );
+
+          eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            switch (data.type) {
+              case "connected":
+                addLog("Connected to log stream", "info");
+                break;
+              case "log":
+                addLog(data.message, "log");
+                break;
+              case "info":
+                addLog(data.message, "log");
+                break;
+              case "error":
+                addLog(data.message, "error");
+                break;
+              case "success":
+                addLog(data.message, "success");
+                break;
+              case "completed":
+                addLog("✅ Scraping completed!", "success");
+                eventSource.close();
+                break;
+              case "failed":
+                addLog("❌ Scraping failed!", "error");
+                eventSource.close();
+                break;
+            }
+          };
+
+          eventSource.onerror = (error) => {
+            addLog("Connection lost", "error");
+            eventSource.close();
+          };
+        } catch (error) {
+          addLog(`Error: ${error.message}`, "error");
+        }
+      }
+
+      // function addLog(type, message) {
+      //   const logEntry = document.createElement("div");
+      //   logEntry.className = `log log-${type}`;
+      //   logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      //   logsDiv.appendChild(logEntry);
+      //   logsDiv.scrollTop = logsDiv.scrollHeight; // Auto-scroll
+      // }
+    </script>
+  </body>
+</html>

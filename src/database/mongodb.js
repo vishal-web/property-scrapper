@@ -1,25 +1,35 @@
 const { MongoClient } = require("mongodb");
 
 class MongoDB {
-  constructor(config) {
-    this.config = config;
-    this.client = null;
-    this.db = null;
+  static client = null;
+  static db = null;
+  static config = null;
+
+  constructor() {
+    // ✅ No config parameter needed
+    // Uses static config set by MongoDB.connect()
   }
 
-  async connect() {
-    console.log("🔌 Connecting to MongoDB...");
-    this.client = new MongoClient(this.config.database.uri);
-    await this.client.connect();
-    this.db = this.client.db(this.config.database.dbName);
+  static async connect(config) {
+    if (MongoDB.client && MongoDB.db) {
+      console.log("✅ Already connected to MongoDB");
+      return;
+    }
 
-    await this.createIndexes();
+    MongoDB.config = config; // ✅ Store config statically
+    console.log("🔌 Connecting to MongoDB...");
+    MongoDB.client = new MongoClient(config.database.uri);
+    await MongoDB.client.connect();
+    MongoDB.db = MongoDB.client.db(config.database.dbName);
+
+    await MongoDB.createAllIndexes();
     console.log("✅ Connected to MongoDB");
   }
 
-  async createIndexes() {
-    const propertiesCollection = this.getCollection("properties");
-
+  static async createAllIndexes() {
+    const propertiesCollection = MongoDB.db.collection(
+      MongoDB.config.database.collections.properties
+    );
     await propertiesCollection.createIndexes([
       { key: { "metadata.hash": 1 }, unique: true },
       { key: { "metadata.scrapedAt": -1 } },
@@ -27,76 +37,29 @@ class MongoDB {
       { key: { priceNumeric: 1 } },
       { key: { propertyUrl: 1 } },
     ]);
+
+    const progressCollection = MongoDB.db.collection(
+      MongoDB.config.database.collections.scrapeProgress
+    );
+    await progressCollection.createIndexes([
+      { key: { baseUrl: 1 }, unique: true },
+      { key: { lastScrapedAt: -1 } },
+      { key: { status: 1 } },
+    ]);
   }
 
   getCollection(collectionName) {
-    return this.db.collection(this.config.database.collections[collectionName]);
-  }
-
-  async saveProperties(properties) {
-    if (properties.length === 0)
-      return { inserted: 0, updated: 0, duplicates: 0 };
-
-    const collection = this.getCollection("properties");
-
-    const bulkOps = properties.map((property) => {
-      const { metadata, ...rest } = property;
-
-      return {
-        updateOne: {
-          filter: { "metadata.hash": metadata.hash },
-          update: {
-            $set: {
-              ...rest,
-
-              // ✅ update metadata fields individually (NO conflicts)
-              "metadata.hash": metadata.hash,
-              "metadata.scrapedAt": new Date(metadata.scrapedAt),
-              "metadata.source": metadata.source,
-              "metadata.isActive": metadata.isActive,
-              "metadata.lastUpdated": new Date(),
-            },
-            $setOnInsert: {
-              "metadata.firstScrapedAt": new Date(),
-            },
-          },
-          upsert: true,
-        },
-      };
-    });
-
-    const result = await collection.bulkWrite(bulkOps);
-
-    return {
-      inserted: result.upsertedCount,
-      updated: result.modifiedCount,
-      duplicates: result.matchedCount - result.modifiedCount,
-    };
-  }
-
-  async saveErrors(errors) {
-    if (errors.length === 0) return;
-
-    const collection = this.getCollection("errors");
-    await collection.insertMany(
-      errors.map((err) => ({
-        ...err,
-        timestamp: new Date(),
-      }))
+    return MongoDB.db.collection(
+      MongoDB.config.database.collections[collectionName]
     );
   }
 
-  async logScrapeRun(stats) {
-    const collection = this.getCollection("scrapeLogs");
-    await collection.insertOne({
-      stats,
-      timestamp: new Date(),
-    });
-  }
-
-  async close() {
-    if (this.client) {
-      await this.client.close();
+  static async close() {
+    if (MongoDB.client) {
+      await MongoDB.client.close();
+      MongoDB.client = null;
+      MongoDB.db = null;
+      MongoDB.config = null;
       console.log("👋 MongoDB connection closed");
     }
   }

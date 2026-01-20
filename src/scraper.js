@@ -1,6 +1,7 @@
 const puppeteer = require("puppeteer");
 const DataProcessor = require("./utils/dataProcessor");
 const Validator = require("./utils/validator");
+const { PropertyRepository, ProgressRepository } = require("./database");
 const fs = require("fs").promises;
 
 class PropertyScraper {
@@ -17,7 +18,14 @@ class PropertyScraper {
       startTime: null,
       endTime: null,
     };
+
     this.collected = new Map();
+    this.baseUrl = null;
+    this.targetUrl = null;
+    this.currentPage = 1;
+
+    this.propertyRepo = new PropertyRepository();
+    this.progressRepo = new ProgressRepository();
   }
 
   async initBrowser() {
@@ -87,13 +95,29 @@ class PropertyScraper {
     return allProperties;
   }
 
-  buildPageUrl() {
+  buildPageUrl(customeUrl = null, pageNumber = 0) {
     // CUSTOMIZE based on website pagination
-    return `${this.config.scraping.targetUrl}`;
+    let url = customeUrl || `${this.config.scraping.targetUrl}`;
+
+    this.baseUrl = url;
+
+    if (pageNumber > 1) {
+      const separator = url.includes("?") ? "&" : "?";
+      url = `${url}${separator}page=${pageNumber}`;
+    }
+
+    this.targetUrl = url;
+
+    return url;
   }
 
-  async scrapePage() {
-    const url = this.buildPageUrl();
+  async scrapePage(targetUrl = null) {
+    const { startPage, progress } = await this.determineStartPage(targetUrl);
+    const pageNumber = startPage;
+
+    this.currentPage = pageNumber;
+
+    const url = this.buildPageUrl(targetUrl, pageNumber);
 
     await this.page.goto(url, {
       waitUntil: "networkidle2",
@@ -108,27 +132,26 @@ class PropertyScraper {
       return [];
     }
 
-    console.log("✅ Initial chunk collect...");
-    await this.collectChunk();
-    await this.saveCheckpointToFile();
-
-    console.log("auto scroll started");
+    console.log("✅ Initial chunk collect...", url);
+    const firstChunkData = await this.collectChunk();
+    await this.saveCheckpoint(firstChunkData);
 
     const options = {
       paginationSelector: ".mb-pagination",
       maxScrollCycles: 250,
       maxNoNewCardTries: 30,
       bottomHitTriesBeforeNext: 2,
+      pageNumber,
     };
 
-    // await this.autoScrollWithPaginationIntelligence(options, async () => {
-    //   // ✅ only save when new cards come
-    //   const added = await this.collectChunk();
-    //   if (added > 0) {
-    //     await this.saveCheckpointToFile();
-    //   }
-    //   return added;
-    // });
+    await this.autoScrollWithPaginationIntelligence(options, async () => {
+      // ✅ only save when new cards come
+      const data = await this.collectChunk();
+      if (data.length > 0) {
+        await this.saveCheckpoint(data);
+      }
+      return data;
+    });
 
     return Array.from(this.collected.values());
   }
@@ -165,6 +188,18 @@ class PropertyScraper {
         try {
           const propertyUrl = card.querySelector(selectors.link)?.href || "";
 
+          let jsonLd = null;
+          const scriptTag = card.querySelector(
+            'script[type="application/ld+json"]'
+          );
+          if (scriptTag) {
+            try {
+              jsonLd = JSON.parse(scriptTag.textContent);
+            } catch (e) {
+              console.error("JSON-LD parse error:", e);
+            }
+          }
+
           data.push({
             title: getText(card, selectors.title),
             price: getText(card, selectors.price),
@@ -183,12 +218,23 @@ class PropertyScraper {
             ownership: getText(card, selectors.ownership),
             society: getText(card, selectors.society),
             balcony: getText(card, selectors.balcony),
+            tenentPreffered: getText(card, selectors.tenentPreffered),
 
             propertyType: getText(card, selectors.propertyType),
             imageUrl: getImage(card, selectors.image),
-            propertyUrl,
             description: getText(card, selectors.description),
             listingId: card.getAttribute("data-id") || "",
+
+            propertyUrl: jsonLd?.url || jsonLd?.["@id"] || propertyUrl,
+            location: jsonLd?.address?.addressLocality,
+            city: jsonLd?.address?.addressRegion || "",
+            country: jsonLd?.address?.addressCountry || "",
+
+            // 🎯 BONUS: Geographic coordinates
+            latitude: jsonLd?.geo?.latitude || null,
+            longitude: jsonLd?.geo?.longitude || null,
+
+            jsonLd,
           });
         } catch (err) {}
       });
@@ -199,7 +245,7 @@ class PropertyScraper {
     return properties.map((prop) =>
       DataProcessor.processProperty({
         ...prop,
-        source: this.config.scraping.baseUrl,
+        source: this.targetUrl,
       })
     );
   }
@@ -295,9 +341,13 @@ class PropertyScraper {
     // small pause so DOM settles
     await this.wait(1000);
 
+    if (updated) {
+      ++this.currentPage;
+    }
+
     console.log(
       updated
-        ? "✅ Next page loaded"
+        ? "✅ Next page loaded. Page = " + this.currentPage
         : "⚠️ Next clicked but cards not clearly updated"
     );
 
@@ -381,12 +431,11 @@ class PropertyScraper {
         .catch(() => 0);
 
       if (afterCount > beforeCount || newCardsLoaded) {
+        ++this.currentPage;
+
         // ✅ extract and save chunk periodically
         if (typeof onChunk === "function") {
-          const chunk = await onChunk();
-          if (chunk && chunk.length) {
-            console.log(`📦 Chunk saved: +${chunk.length}`);
-          }
+          await onChunk();
         }
 
         noNewCardTries = 0;
@@ -436,29 +485,80 @@ class PropertyScraper {
     console.log("⚠️ Max scroll cycles reached. Stopping.");
   }
 
-  async saveCheckpointToFile(filePath = "./scraped-checkpoint.json") {
+  async saveCheckpoint(properties) {
+    if (properties.length === 0) {
+      console.log("❌ No properties found. Ending scrape.");
+      await this.progressRepo.markCompleted(this.baseUrl);
+      return;
+    }
+
+    const saveStats = await this.savePropertiesWithStats(properties);
+
+    // ✅ Update progress after each page
+    await this.progressRepo.updatePageProgress(this.baseUrl, this.currentPage, {
+      total: properties.length,
+      inserted: saveStats.inserted,
+      updated: saveStats.updated,
+      duplicates: saveStats.duplicates,
+    });
+
     const arr = Array.from(this.collected.values());
-    await fs.writeFile(filePath, JSON.stringify(arr, null, 2), "utf-8");
-    console.log(`💾 Checkpoint saved: ${arr.length} total properties`);
+    console.log(
+      `💾 Checkpoint saved: ${arr.length} total properties`,
+      saveStats
+    );
   }
 
   async collectChunk() {
+    const newlyAdded = [];
     const items = await this.extractPropertiesFromPage();
 
-    let added = 0;
-
     for (const item of items) {
-      const key =
-        String(item.title).toLowerCase().replaceAll(" ", "-") || item.listingId;
+      const key = item.metadata.hash;
       if (!key) continue;
 
       if (!this.collected.has(key)) {
         this.collected.set(key, item);
-        added++;
+        newlyAdded.push(item);
       }
     }
 
-    return added;
+    return newlyAdded;
+  }
+
+  async savePropertiesWithStats(properties) {
+    // Assuming you have propertyRepo available
+    const result = await this.propertyRepo.saveProperties(properties);
+
+    return {
+      total: properties.length,
+      inserted: result.inserted,
+      updated: result.updated,
+      duplicates: result.duplicates,
+    };
+  }
+
+  async determineStartPage(baseUrl) {
+    const progress = await this.progressRepo.getProgress(baseUrl);
+
+    if (progress) {
+      console.log(`📊 Found previous scrape:`);
+      console.log(`   Last page: ${progress.lastCompletedPage}`);
+      console.log(`   Total scraped: ${progress.totalPropertiesScraped}`);
+      console.log(
+        `   New: ${progress.newProperties}, Updated: ${progress.updatedProperties}`
+      );
+
+      const startPage = progress.lastCompletedPage + 1;
+      console.log(`🔄 Resuming from page ${startPage}...`);
+
+      return { startPage, progress };
+    }
+
+    console.log(`🆕 First time scraping this URL`);
+    await this.progressRepo.initProgress(baseUrl);
+
+    return { startPage: 1, progress: null };
   }
 }
 

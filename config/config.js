@@ -20,6 +20,7 @@ const config = {
       properties: 'properties',
       scrapeLogs: 'scrape_logs',
       errors: 'scrape_errors',
+      scrapeProgress: 'scrape_progress',
     },
   },
 
@@ -56,6 +57,7 @@ const config = {
     ownership: '[data-summary="ownership"]',
     society: '[data-summary="society"]',
     balcony: '[data-summary="balcony"]',
+    tenentPreffered: '[data-summary="tenent-preffered"] .mb-srp__card__summary--value',
     propertyType: '.type, .property-type, .category',
     image: 'img',
     link: 'a',
