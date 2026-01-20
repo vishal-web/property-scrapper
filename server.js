@@ -3,7 +3,7 @@ const cors = require('cors');
 const runScraper = require('./index');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());

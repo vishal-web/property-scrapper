@@ -4,7 +4,7 @@
   "description": "Production-ready property website scraper with MongoDB integration",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node server.js",
     "dev": "nodemon index.js",
     "test": "node index.js --test",
     "server": "node server.js",
