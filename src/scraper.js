@@ -30,7 +30,8 @@ class PropertyScraper {
 
   async initBrowser() {
     console.log("🚀 Launching browser...");
-    this.browser = await puppeteer.launch({
+
+    const browserConfig = {
       headless: this.config.browser.headless,
       args: [
         "--no-sandbox",
@@ -38,7 +39,15 @@ class PropertyScraper {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
       ],
-    });
+    }
+
+    if (this.config.isProduction) {
+      browserConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH; // ✅ uses system chromium
+    }
+    
+console.log(JSON.stringify(browserConfig, null, 2));
+
+    this.browser = await puppeteer.launch(browserConfig);
 
     this.page = await this.browser.newPage();
     await this.page.setViewport(this.config.browser.viewport);

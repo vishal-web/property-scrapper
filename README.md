@@ -58,6 +58,13 @@ Key configurations:
 - CSS selectors (customize for your site)
 - Validation rules
 
+
+# Docker
+
+docker build -t property-scraper .
+docker run -p 3000:3000 property-scraper
+
+
 ## License
 
 MIT
