@@ -1,11 +1,13 @@
-const PropertyScraper = require("./scraper/PropertyScraper");
-const config = require("./config/scraper.config");
+const PropertyScraper = require("./PropertyScraper.js");
+const config = require("../../config/config.js");
+const MongoDB = require('../database/mongodb.js');
 
 const args = process.argv.slice(2);
 const urlArg = args.find((a) => a.startsWith("--url="));
 const url = urlArg ? urlArg.split("=")[1] : config.scraping.targetUrl;
 
 (async () => {
+  await MongoDB.connect(config);
   const scraper = new PropertyScraper(config);
 
   try {

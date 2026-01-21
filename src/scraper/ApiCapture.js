@@ -43,7 +43,7 @@ class ApiCapture {
     await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
 
     // wait a bit so API calls happen
-    await page.waitForTimeout(5000);
+    await this.delay(5000);
 
     const cookies = await page.cookies();
     await browser.close();
@@ -64,6 +64,10 @@ class ApiCapture {
       lower.includes("listing") ||
       lower.includes("api")
     );
+  }
+
+  async delay(ms) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 

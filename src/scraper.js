@@ -23,6 +23,9 @@ class PropertyScraper {
     this.baseUrl = null;
     this.targetUrl = null;
     this.currentPage = 1;
+    this.lastScrapedCardIndex = 0;
+
+    this.dataStream = null;
 
     this.propertyRepo = new PropertyRepository();
     this.progressRepo = new ProgressRepository();
@@ -39,13 +42,11 @@ class PropertyScraper {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
       ],
-    }
+    };
 
     if (this.config.isProduction) {
       browserConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH; // ✅ uses system chromium
     }
-    
-console.log(JSON.stringify(browserConfig, null, 2));
 
     this.browser = await puppeteer.launch(browserConfig);
 
@@ -67,43 +68,6 @@ console.log(JSON.stringify(browserConfig, null, 2));
     console.log("✅ Browser ready");
   }
 
-  async scrapeWithPagination() {
-    const allProperties = [];
-    let currentPage = 1;
-    let hasNextPage = true;
-
-    while (hasNextPage && currentPage <= this.config.scraping.maxPages) {
-      console.log(`\n📄 Scraping page ${currentPage}...`);
-
-      try {
-        const pageUrl = this.buildPageUrl(currentPage);
-        console.log("scraping started");
-        const properties = await this.scrapePage(pageUrl);
-        console.log("scraping ended");
-
-        if (properties.length === 0) {
-          console.log("No more properties found");
-          break;
-        }
-
-        allProperties.push(...properties);
-        console.log(`✅ Page ${currentPage}: ${properties.length} properties`);
-
-        hasNextPage = await this.hasNextPage();
-
-        if (hasNextPage) {
-          currentPage++;
-          await this.delay(this.config.scraping.delayBetweenPages);
-        }
-      } catch (error) {
-        console.error(`❌ Error on page ${currentPage}:`, error.message);
-        break;
-      }
-    }
-
-    return allProperties;
-  }
-
   buildPageUrl(customeUrl = null, pageNumber = 0) {
     // CUSTOMIZE based on website pagination
     let url = customeUrl || `${this.config.scraping.targetUrl}`;
@@ -117,10 +81,17 @@ console.log(JSON.stringify(browserConfig, null, 2));
 
     this.targetUrl = url;
 
+    if (this.dataStream) {
+      this.dataStream.sendInfo(`📄 Scraping page ${url}`);
+    }
+
     return url;
   }
 
   async scrapePage(targetUrl = null) {
+    this.lastScrapedCardIndex = 0;
+    this.collected.clear();
+
     const { startPage, progress } = await this.determineStartPage(targetUrl);
     const pageNumber = startPage;
 
@@ -145,6 +116,28 @@ console.log(JSON.stringify(browserConfig, null, 2));
     const firstChunkData = await this.collectChunk();
     await this.saveCheckpoint(firstChunkData);
 
+    // ✅ CHECK PAGINATION FIRST - NEW LOGIC
+    const paginationCheck = await this.checkAndHandlePagination();
+
+    if (paginationCheck.action === "scrape_only") {
+      // No pagination exists - just return what we have
+      console.log("✅ Page scraped. No pagination to handle.");
+      return Array.from(this.collected.values());
+    }
+
+    if (paginationCheck.action === "next_clicked") {
+      // Pagination was visible, clicked Next, recursively scrape new page
+      console.log("✅ Moved to next page. Re-scraping...");
+      return await this.scrapePage(targetUrl);
+    }
+
+    if (paginationCheck.action === "pagination_end") {
+      // Pagination visible but Next disabled - we're done
+      console.log("✅ Reached end of pagination.");
+      await this.progressRepo.markCompleted(this.baseUrl);
+      return Array.from(this.collected.values());
+    }
+
     const options = {
       paginationSelector: ".mb-pagination",
       maxScrollCycles: 250,
@@ -168,94 +161,114 @@ console.log(JSON.stringify(browserConfig, null, 2));
   async extractPropertiesFromPage() {
     const selectors = this.config.selectors;
 
-    const properties = await this.page.evaluate((selectors) => {
-      const cards = document.querySelectorAll(selectors.propertyCard);
-      const data = [];
+    const properties = await this.page.evaluate(
+      (selectors, startIndex) => {
+        const cards = document.querySelectorAll(selectors.propertyCard);
+        const data = [];
 
-      // ✅ helper: get text safely
-      const getText = (root, sel) => {
-        if (!sel) return "";
-        const el = root.querySelector(sel);
-        return el ? (el.innerText || el.textContent || "").trim() : "";
-      };
+        // ✅ helper: get text safely
+        const getText = (root, sel) => {
+          if (!sel) return "";
+          const el = root.querySelector(sel);
+          return el ? (el.innerText || el.textContent || "").trim() : "";
+        };
 
-      // ✅ helper: get image url safely
-      const getImage = (root, sel) => {
-        const imgEl = sel ? root.querySelector(sel) : null;
-        if (!imgEl) return "";
+        // ✅ helper: get image url safely
+        const getImage = (root, sel) => {
+          const imgEl = sel ? root.querySelector(sel) : null;
+          if (!imgEl) return "";
 
-        return (
-          imgEl.getAttribute("src") ||
-          imgEl.getAttribute("data-src") ||
-          imgEl.getAttribute("data-original") ||
-          imgEl.getAttribute("srcset")?.split(" ")[0] ||
-          ""
-        );
-      };
-
-      cards.forEach((card) => {
-        try {
-          const propertyUrl = card.querySelector(selectors.link)?.href || "";
-
-          let jsonLd = null;
-          const scriptTag = card.querySelector(
-            'script[type="application/ld+json"]'
+          return (
+            imgEl.getAttribute("src") ||
+            imgEl.getAttribute("data-src") ||
+            imgEl.getAttribute("data-original") ||
+            imgEl.getAttribute("srcset")?.split(" ")[0] ||
+            ""
           );
-          if (scriptTag) {
-            try {
-              jsonLd = JSON.parse(scriptTag.textContent);
-            } catch (e) {
-              console.error("JSON-LD parse error:", e);
+        };
+
+        for (let i = startIndex; i < cards.length; i++) {
+          const card = cards[i];
+          try {
+            if (card.hasAttribute("data-scraped")) {
+              continue;
             }
-          }
 
-          data.push({
-            title: getText(card, selectors.title),
-            price: getText(card, selectors.price),
-            location: getText(card, selectors.location),
+            card.setAttribute("data-scraped", "true");
 
-            bedrooms: getText(card, selectors.bedrooms),
-            bathrooms: getText(card, selectors.bathrooms),
-            parking: getText(card, selectors.parking),
-            area: getText(card, selectors.area),
-            floor: getText(card, selectors.floor),
-            status: getText(card, selectors.status),
-            transaction: getText(card, selectors.transaction),
-            furnishing: getText(card, selectors.furnishing),
-            facing: getText(card, selectors.facing),
-            overlooking: getText(card, selectors.overlooking),
-            ownership: getText(card, selectors.ownership),
-            society: getText(card, selectors.society),
-            balcony: getText(card, selectors.balcony),
-            tenentPreffered: getText(card, selectors.tenentPreffered),
+            const propertyUrl = card.querySelector(selectors.link)?.href || "";
 
-            propertyType: getText(card, selectors.propertyType),
-            imageUrl: getImage(card, selectors.image),
-            description: getText(card, selectors.description),
-            listingId: card.getAttribute("data-id") || "",
+            let jsonLd = null;
+            const scriptTag = card.querySelector(
+              'script[type="application/ld+json"]',
+            );
+            if (scriptTag) {
+              try {
+                jsonLd = JSON.parse(scriptTag.textContent);
+              } catch (e) {
+                console.error("JSON-LD parse error:", e);
+              }
+            }
 
-            propertyUrl: jsonLd?.url || jsonLd?.["@id"] || propertyUrl,
-            location: jsonLd?.address?.addressLocality,
-            city: jsonLd?.address?.addressRegion || "",
-            country: jsonLd?.address?.addressCountry || "",
+            data.push({
+              title: getText(card, selectors.title),
+              price: getText(card, selectors.price),
+              location: getText(card, selectors.location),
 
-            // 🎯 BONUS: Geographic coordinates
-            latitude: jsonLd?.geo?.latitude || null,
-            longitude: jsonLd?.geo?.longitude || null,
+              bedrooms: getText(card, selectors.bedrooms),
+              bathrooms: getText(card, selectors.bathrooms),
+              parking: getText(card, selectors.parking),
+              area: getText(card, selectors.area),
+              floor: getText(card, selectors.floor),
+              status: getText(card, selectors.status),
+              transaction: getText(card, selectors.transaction),
+              furnishing: getText(card, selectors.furnishing),
+              facing: getText(card, selectors.facing),
+              overlooking: getText(card, selectors.overlooking),
+              ownership: getText(card, selectors.ownership),
+              society: getText(card, selectors.society),
+              balcony: getText(card, selectors.balcony),
+              tenentPreffered: getText(card, selectors.tenentPreffered),
 
-            jsonLd,
-          });
-        } catch (err) {}
-      });
+              propertyType: getText(card, selectors.propertyType),
+              imageUrl: getImage(card, selectors.image),
+              description: getText(card, selectors.description),
+              listingId: card.getAttribute("data-id") || "",
 
-      return data;
-    }, selectors);
+              propertyUrl: jsonLd?.url || jsonLd?.["@id"] || propertyUrl,
+              location: jsonLd?.address?.addressLocality,
+              city: jsonLd?.address?.addressRegion || "",
+              country: jsonLd?.address?.addressCountry || "",
+
+              // 🎯 BONUS: Geographic coordinates
+              latitude: jsonLd?.geo?.latitude || null,
+              longitude: jsonLd?.geo?.longitude || null,
+
+              jsonLd,
+              isNew: true,
+            });
+          } catch (err) {}
+        }
+
+        return data;
+      },
+      selectors,
+      this.lastScrapedCardIndex,
+    );
+
+    this.lastScrapedCardIndex = properties.length;
+
+    if (this.dataStream) {
+      this.dataStream.sendInfo(
+        `✅ Found ${properties.length} properties on page ${this.currentPage}`,
+      );
+    }
 
     return properties.map((prop) =>
       DataProcessor.processProperty({
         ...prop,
         source: this.targetUrl,
-      })
+      }),
     );
   }
 
@@ -284,14 +297,19 @@ console.log(JSON.stringify(browserConfig, null, 2));
 
   async isElementInViewport(selector) {
     return await this.page.evaluate((sel) => {
-      console.log("isElementinViewPost", sel);
+      const data = { isElementExist: false, isElementInViewport: false };
+
+      console.log("isElementinViewPort", sel);
       const el = document.querySelector(sel);
-      if (!el) return false;
+      if (!el) return data;
 
       const rect = el.getBoundingClientRect();
       const vh = window.innerHeight || document.documentElement.clientHeight;
 
-      return rect.top < vh && rect.bottom > 0;
+      data.isElementExist = true;
+      data.isElementInViewport = rect.top < vh && rect.bottom > 0;
+
+      return data;
     }, selector);
   }
 
@@ -336,7 +354,7 @@ console.log(JSON.stringify(browserConfig, null, 2));
         (sel, oldCount) => document.querySelectorAll(sel).length !== oldCount,
         { timeout: 12000 },
         propertyCard,
-        beforeCount
+        beforeCount,
       );
       updated = true;
     } catch (e) {}
@@ -357,7 +375,7 @@ console.log(JSON.stringify(browserConfig, null, 2));
     console.log(
       updated
         ? "✅ Next page loaded. Page = " + this.currentPage
-        : "⚠️ Next clicked but cards not clearly updated"
+        : "⚠️ Next clicked but cards not clearly updated",
     );
 
     return updated;
@@ -379,18 +397,23 @@ console.log(JSON.stringify(browserConfig, null, 2));
     console.log("🧠 Smart scroll started...");
 
     for (let cycle = 1; cycle <= maxScrollCycles; cycle++) {
+      if (cycle === 1) {
+        console.log("🧠 Already scraped first page let's skip this..");
+
+        continue;
+      }
+
       const beforeCount = await this.page
         .$$eval(propertyCard, (els) => els.length)
         .catch(() => 0);
 
       // ✅ stop scrolling if pagination is visible
-      const paginationVisible = await this.isElementInViewport(
-        paginationSelector
-      );
+      const paginationVisible =
+        await this.isElementInViewport(paginationSelector);
 
-      if (paginationVisible) {
+      if (paginationVisible?.isElementInViewport) {
         console.log(
-          `✅ Pagination visible (${paginationSelector}). Trying Next...`
+          `✅ Pagination visible (${paginationSelector}). Trying Next...`,
         );
 
         const moved = await this.clickNextAndWaitForNewCards();
@@ -407,6 +430,9 @@ console.log(JSON.stringify(browserConfig, null, 2));
           console.log("❌ Next not possible (disabled/not found). Ending.");
           return;
         }
+      }
+
+      if (cycle === 1 && paginationVisible?.isElementExist) {
       }
 
       // ✅ scroll humanly
@@ -430,7 +456,7 @@ console.log(JSON.stringify(browserConfig, null, 2));
           (sel, oldCount) => document.querySelectorAll(sel).length > oldCount,
           { timeout: 4500 },
           propertyCard,
-          beforeCount
+          beforeCount,
         );
         newCardsLoaded = true;
       } catch (e) {}
@@ -463,7 +489,7 @@ console.log(JSON.stringify(browserConfig, null, 2));
       else bottomHits = 0;
 
       console.log(
-        `[Cycle ${cycle}] cards: ${beforeCount} → ${afterCount} | noNewTries=${noNewCardTries} | nearBottom=${nearBottom}`
+        `[Cycle ${cycle}] cards: ${beforeCount} → ${afterCount} | noNewTries=${noNewCardTries} | nearBottom=${nearBottom}`,
       );
 
       // ✅ If bottom hit too many times, try clicking NEXT
@@ -511,10 +537,22 @@ console.log(JSON.stringify(browserConfig, null, 2));
       duplicates: saveStats.duplicates,
     });
 
+    if (this.dataStream) {
+      this.dataStream.sendPartialData({
+        checkpoint: true,
+        page: this.currentPage,
+        pageProperties: properties.length,
+        properties: properties,
+        totalScraped: 0,
+        newProperties: saveStats.inserted,
+        updatedProperties: saveStats.updated,
+      });
+    }
+
     const arr = Array.from(this.collected.values());
     console.log(
       `💾 Checkpoint saved: ${arr.length} total properties`,
-      saveStats
+      saveStats,
     );
   }
 
@@ -555,11 +593,21 @@ console.log(JSON.stringify(browserConfig, null, 2));
       console.log(`   Last page: ${progress.lastCompletedPage}`);
       console.log(`   Total scraped: ${progress.totalPropertiesScraped}`);
       console.log(
-        `   New: ${progress.newProperties}, Updated: ${progress.updatedProperties}`
+        `   New: ${progress.newProperties}, Updated: ${progress.updatedProperties}`,
       );
 
       const startPage = progress.lastCompletedPage + 1;
       console.log(`🔄 Resuming from page ${startPage}...`);
+
+      if (this.dataStream) {
+        this.dataStream.sendPartialData({
+          resuming: true,
+          fromPage: startPage,
+          previousTotal: progress.totalPropertiesScraped,
+          newCount: progress.newProperties,
+          updatedCount: progress.updatedProperties,
+        });
+      }
 
       return { startPage, progress };
     }
@@ -568,6 +616,50 @@ console.log(JSON.stringify(browserConfig, null, 2));
     await this.progressRepo.initProgress(baseUrl);
 
     return { startPage: 1, progress: null };
+  }
+
+  async checkAndHandlePagination() {
+    const { paginationSelector, nextButton } = {
+      paginationSelector: ".mb-pagination",
+      nextButton: this.config.selectors.nextButton,
+    };
+
+    // ✅ Check if pagination exists on page
+    const paginationExists = await this.page.evaluate((sel) => {
+      return !!document.querySelector(sel);
+    }, paginationSelector);
+
+    if (!paginationExists) {
+      console.log(
+        "ℹ️  No pagination found. Skipping scroll, will scrape current view only.",
+      );
+      return { shouldScroll: false, action: "scrape_only" };
+    }
+
+    console.log("✅ Pagination detected on page");
+
+    // ✅ Check if pagination is already visible (no scroll needed)
+    const paginationVisible =
+      await this.isElementInViewport(paginationSelector);
+
+    if (paginationVisible) {
+      console.log("✅ Pagination already visible. Clicking Next...");
+      const moved = await this.clickNextAndWaitForNewCards();
+
+      return {
+        shouldScroll: false,
+        action: moved ? "next_clicked" : "pagination_end",
+        moved,
+      };
+    }
+
+    // ✅ Pagination exists but not visible - need to scroll
+    console.log("📜 Pagination exists but not visible. Need to scroll...");
+    return { shouldScroll: true, action: "scroll_to_pagination" };
+  }
+
+  setDataStream(stream) {
+    this.dataStream = stream;
   }
 }
 

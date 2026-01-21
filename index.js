@@ -9,7 +9,7 @@ const {
   ErrorRepository,
 } = require("./src/database");
 
-async function main(targetUrl = null) {
+async function main(targetUrl = null, dataStream = null) {
   const startTime = new Date();
 
   const url = targetUrl || config.scraping.targetUrl;
@@ -21,6 +21,10 @@ async function main(targetUrl = null) {
   console.log(`  Database: ${config.database.dbName}\n`);
 
   const scraper = new PropertyScraper(config);
+
+  if (dataStream) {
+    scraper.setDataStream(dataStream);
+  }
 
   const validator = new Validator(config);
   const exporter = new Exporter();
@@ -62,8 +66,8 @@ async function main(targetUrl = null) {
 
     // Export data
     console.log("\n📁 Exporting data...");
-    await exporter.exportToJSON(valid);
-    await exporter.exportToCSV(valid);
+    // await exporter.exportToJSON(valid);
+    // await exporter.exportToCSV(valid);
 
     // Log run
     const endTime = new Date();
@@ -88,7 +92,6 @@ async function main(targetUrl = null) {
     process.exit(1);
   } finally {
     await scraper.close();
-    await MongoDB.close();
   }
 }
 
@@ -97,7 +100,7 @@ function printSummary(stats) {
   console.log("📊 SCRAPING SUMMARY");
   console.log("=".repeat(50));
   console.log(`⏱️  Duration: ${stats.duration.toFixed(2)}s`);
-  console.log(`📄 Total: ${stats.totalScraped}`);
+  console.log(`📄 Total: ${stats.totalScraped || 0}`);
   console.log(`✅ Valid: ${stats.successful}`);
   console.log(`❌ Invalid: ${stats.failed}`);
   console.log("=".repeat(50));
@@ -109,6 +112,7 @@ const urlArg = args.find((arg) => arg.startsWith("--url="));
 const targetUrl = urlArg ? urlArg.replace("--url=", "") : null;
 
 // Run
+
 // main(targetUrl);
 
 module.exports = main;

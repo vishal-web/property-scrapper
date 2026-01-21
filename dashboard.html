@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -135,6 +135,9 @@
     <script>
       let properties = [];
       let isRunning = false;
+      let eventSource = null;
+
+      const apiUrl = apiUrl;
 
       function addLog(message, type = "info") {
         const logsContainer = document.getElementById("logsContainer");
@@ -146,31 +149,34 @@
           info: "text-gray-300",
           success: "text-green-400",
           error: "text-red-400",
+          warning: "text-yellow-400",
         };
 
         const logEntry = document.createElement("div");
-        logEntry.className = `mb-1 ${colors[type]}`;
+        logEntry.className = `mb-1 ${colors[type] || colors.info}`;
         logEntry.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${message}`;
         logsContent.appendChild(logEntry);
         logsContent.scrollTop = logsContent.scrollHeight;
       }
 
-      function updateStats(total, success, failed) {
+      function updateStats(total, newCount, updatedCount) {
         document.getElementById("totalCount").textContent = total;
-        document.getElementById("successCount").textContent = success;
-        document.getElementById("failedCount").textContent = failed;
+        document.getElementById("successCount").textContent = newCount;
+        document.getElementById("failedCount").textContent = updatedCount;
       }
 
-      function renderProperties(data) {
+      function renderProperties(data, append = false) {
         const tableBody = document.getElementById("tableBody");
         const tableContainer = document.getElementById("tableContainer");
         const emptyState = document.getElementById("emptyState");
         const propertyCount = document.getElementById("propertyCount");
         const exportBtn = document.getElementById("exportBtn");
 
-        tableBody.innerHTML = "";
+        if (!append) {
+          tableBody.innerHTML = "";
+        }
 
-        if (data.length === 0) {
+        if (data.length === 0 && !append) {
           tableContainer.style.display = "none";
           emptyState.style.display = "block";
           exportBtn.disabled = true;
@@ -180,30 +186,42 @@
         tableContainer.style.display = "block";
         emptyState.style.display = "none";
         exportBtn.disabled = false;
-        propertyCount.textContent = data.length;
+        propertyCount.textContent = properties.length;
 
-        data.forEach((property) => {
+        const propertiesToRender = append ? data : data;
+
+        propertiesToRender.forEach((property) => {
           const row = document.createElement("tr");
           row.className = "border-b hover:bg-gray-50 transition";
+
+          // Add visual indicator for new vs updated
+          const indicator = property.isNew
+            ? '<span class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">NEW</span>'
+            : '<span class="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">UPDATED</span>';
+
           row.innerHTML = `
-          <td class="px-4 py-3 text-sm text-gray-800">${
-            property.title || property.name || "N/A"
-          }</td>
-          <td class="px-4 py-3 text-sm text-gray-600">📍 ${
-            property.location || property.area || "N/A"
-          }</td>
-          <td class="px-4 py-3 text-sm font-semibold text-green-600">${
-            property.price || property.rent || "N/A"
-          }</td>
-          <td class="px-4 py-3 text-sm text-gray-600">${
-            property.bedrooms || property.bhk || "N/A"
-          } | ${property.area || property.sqft || "N/A"}</td>
-        `;
+            <td class="px-4 py-3 text-sm text-gray-800">
+              ${property.title || property.name || "N/A"}
+              ${property.isNew !== undefined ? indicator : ""}
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-600">📍 ${
+              property.location || property.area || "N/A"
+            }</td>
+            <td class="px-4 py-3 text-sm font-semibold text-green-600">${
+              property.price || property.rent || "N/A"
+            }</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${
+              property.bedrooms || property.bhk || "N/A"
+            } | ${property.area || property.sqft || "N/A"}</td>
+          `;
+
+          // Add animation for new rows
+          row.style.animation = "fadeIn 0.3s ease-in";
           tableBody.appendChild(row);
         });
       }
 
-      async function runScrapers() {
+      async function runScraper() {
         if (isRunning) return;
 
         const urlInput = document.getElementById("urlInput");
@@ -219,12 +237,22 @@
         scrapeBtn.disabled = true;
         scrapeBtn.innerHTML = "⏳ Running...";
 
-        // Clear previous logs
+        // Clear previous data and logs
+        properties = [];
         document.getElementById("logsContent").innerHTML = "";
-        addLog("Starting scraper...", "info");
+        document.getElementById("tableBody").innerHTML = "";
+        updateStats(0, 0, 0);
+
+        // Close previous EventSource if exists
+        if (eventSource) {
+          eventSource.close();
+        }
+
+        addLog("🚀 Starting scraper...", "info");
 
         try {
-          const response = await fetch("http://localhost:3000/api/scrape", {
+          // Start scraping session
+          const response = await fetch(`${apiUrl}/scrape`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url }),
@@ -234,37 +262,156 @@
             throw new Error(`HTTP error! status: ${response.status}`);
           }
 
-          const data = await response.json();
-          properties = data.properties || [];
+          const { sessionId, status, logsUrl } = await response.json();
+          addLog(`📡 Session started: ${sessionId}`, "success");
 
-          updateStats(properties.length, properties.length, 0);
-          renderProperties(properties);
-          addLog(
-            `✅ Scraped ${properties.length} properties successfully`,
-            "success"
-          );
+          // Connect to SSE for real-time streaming
+          eventSource = new EventSource(logsUrl);
+
+          let newCount = 0;
+          let updatedCount = 0;
+
+          eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            switch (data.type) {
+              case "connected":
+                addLog("✅ Connected to stream", "success");
+                break;
+
+              case "log":
+                addLog(data.message, "info");
+                break;
+
+              case "info":
+                addLog(data.message, "info");
+                break;
+
+              case "checkpoint":
+                // Render batch of properties from this page
+                if (data.properties && data.properties.length > 0) {
+                  properties.push(...data.properties);
+                  renderProperties(data.properties, true);
+
+                  // Update counters based on the properties
+                  data.properties.forEach((prop) => {
+                    if (prop.isNew) {
+                      newCount++;
+                    } else {
+                      updatedCount++;
+                    }
+                  });
+
+                  updateStats(properties.length, newCount, updatedCount);
+                }
+
+                addLog(
+                  `💾 Checkpoint: Page ${data.page} complete - ${data.pageProperties} properties found`,
+                  "success",
+                );
+                addLog(
+                  `📊 Stats - Total: ${data.totalScraped}, New: ${data.stats.new}, Updated: ${data.stats.updated}`,
+                  "info",
+                );
+                break;
+
+              case "resume":
+                addLog(
+                  `📊 Resuming from page ${data.fromPage} - Previous total: ${data.previousTotal}`,
+                  "warning",
+                );
+                break;
+
+              case "progress":
+                addLog(
+                  `⏳ ${data.message}${data.percentage ? ` (${data.percentage}%)` : ""}`,
+                  "info",
+                );
+                break;
+
+              case "partial_data":
+                // Handle any additional partial data updates
+                if (data.data) {
+                  addLog(`📦 Received data chunk`, "info");
+                }
+                break;
+
+              case "success":
+                addLog(data.message, "success");
+                if (data.summary) {
+                  addLog(
+                    `📈 Final Summary - Total: ${data.summary.totalScraped}, New: ${data.summary.newProperties}, Updated: ${data.summary.updatedProperties}, Pages: ${data.summary.lastPage}`,
+                    "success",
+                  );
+                }
+                break;
+
+              case "error":
+                addLog(`❌ ${data.message}`, "error");
+                break;
+
+              case "completed":
+                addLog("✅ Scraping completed successfully!", "success");
+                eventSource.close();
+                isRunning = false;
+                scrapeBtn.disabled = false;
+                scrapeBtn.innerHTML = "▶️ Start Scrape";
+                break;
+
+              case "failed":
+                addLog(`❌ Scraping failed: ${data.message}`, "error");
+                eventSource.close();
+                isRunning = false;
+                scrapeBtn.disabled = false;
+                scrapeBtn.innerHTML = "▶️ Start Scrape";
+                break;
+
+              default:
+                console.log("Unknown event type:", data.type, data);
+            }
+          };
+
+          eventSource.onerror = (error) => {
+            addLog("⚠️ Connection lost or ended", "error");
+            eventSource.close();
+            isRunning = false;
+            scrapeBtn.disabled = false;
+            scrapeBtn.innerHTML = "▶️ Start Scrape";
+          };
         } catch (error) {
           addLog(`❌ Error: ${error.message}`, "error");
           addLog(
-            "💡 Make sure your API server is running on http://localhost:3000",
-            "info"
+            `💡 Make sure your API server is running on ${apiUrl}`,
+            "info",
           );
-          updateStats(0, 0, 1);
-        } finally {
           isRunning = false;
           scrapeBtn.disabled = false;
           scrapeBtn.innerHTML = "▶️ Start Scrape";
         }
       }
 
+      function stopScraper() {
+        if (eventSource) {
+          eventSource.close();
+          addLog("⏹️ Scraper stopped by user", "warning");
+        }
+        isRunning = false;
+        const scrapeBtn = document.getElementById("scrapeBtn");
+        scrapeBtn.disabled = false;
+        scrapeBtn.innerHTML = "▶️ Start Scrape";
+      }
+
       function exportToCSV() {
-        if (properties.length === 0) return;
+        if (properties.length === 0) {
+          alert("No properties to export");
+          return;
+        }
 
         const headers = Object.keys(properties[0]).join(",");
         const rows = properties.map((p) =>
           Object.values(p)
-            .map((v) => `"${v}"`)
-            .join(",")
+            .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+            .join(","),
         );
         const csv = [headers, ...rows].join("\n");
 
@@ -275,90 +422,19 @@
         a.download = `properties_${Date.now()}.csv`;
         a.click();
         window.URL.revokeObjectURL(url);
+
+        addLog(`📥 Exported ${properties.length} properties to CSV`, "success");
       }
 
-      let eventSource = null;
-      const logsDiv = document.getElementById("logs");
-
-      async function runScraper() {
-        const url = document.getElementById("urlInput").value;
-
-        if (!url) {
-          alert("Please enter a URL");
-          return;
+      // Add CSS animation
+      const style = document.createElement("style");
+      style.textContent = `
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
         }
-
-        // Clear previous logs
-        // logsDiv.innerHTML = "";
-
-        // Close previous connection if exists
-        if (eventSource) {
-          eventSource.close();
-        }
-
-        try {
-          // Start scraping
-          const response = await fetch("http://localhost:3000/scrape", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url }),
-          });
-
-          const { sessionId, status } = await response.json();
-
-          addLog("info", `Session started: ${sessionId}`);
-
-          // Connect to SSE for logs
-          eventSource = new EventSource(
-            `http://localhost:3000/scrape/logs/${sessionId}`
-          );
-
-          eventSource.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-
-            switch (data.type) {
-              case "connected":
-                addLog("Connected to log stream", "info");
-                break;
-              case "log":
-                addLog(data.message, "log");
-                break;
-              case "info":
-                addLog(data.message, "log");
-                break;
-              case "error":
-                addLog(data.message, "error");
-                break;
-              case "success":
-                addLog(data.message, "success");
-                break;
-              case "completed":
-                addLog("✅ Scraping completed!", "success");
-                eventSource.close();
-                break;
-              case "failed":
-                addLog("❌ Scraping failed!", "error");
-                eventSource.close();
-                break;
-            }
-          };
-
-          eventSource.onerror = (error) => {
-            addLog("Connection lost", "error");
-            eventSource.close();
-          };
-        } catch (error) {
-          addLog(`Error: ${error.message}`, "error");
-        }
-      }
-
-      // function addLog(type, message) {
-      //   const logEntry = document.createElement("div");
-      //   logEntry.className = `log log-${type}`;
-      //   logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-      //   logsDiv.appendChild(logEntry);
-      //   logsDiv.scrollTop = logsDiv.scrollHeight; // Auto-scroll
-      // }
+      `;
+      document.head.appendChild(style);
     </script>
   </body>
 </html>
